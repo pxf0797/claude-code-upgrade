@@ -5,8 +5,15 @@ set -euo pipefail
 # 覆盖场景：全新安装 / 版本升级 / 已是最新 / PATH修复 / 残留清理
 # ============================================================
 
-# 防御：确保 homebrew 路径在 PATH 中（launchd/非交互式环境兼容）
-export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+# 防御：确保 homebrew 路径在 PATH 中（launchd/非交互式环境兼容），仅当缺失时前插，避免制造重复项
+for _d in /opt/homebrew/bin /usr/local/bin; do
+    case ":$PATH:" in
+        *":$_d:"*) ;;                 # 已在 PATH 中，跳过
+        *) PATH="$_d:$PATH" ;;        # 缺失才前插
+    esac
+done
+export PATH
+unset _d
 
 readonly PACKAGE="@anthropic-ai/claude-code"
 readonly LOG_FILE="$HOME/.claude/upgrade-claude.log"
@@ -17,6 +24,7 @@ NPM_PREFIX=""
 NPM_BIN=""
 NPM_ROOT=""
 BREW_RESIDUE=0
+BINARY_HEALTHY=0
 
 # ---- 颜色 ----
 RED='\033[0;31m'
@@ -42,6 +50,34 @@ die() {
     echo "   3. 确认网络可访问: curl -sI https://registry.npmjs.org/ | head -1"
     echo "   4. 日志: cat $LOG_FILE"
     exit 1
+}
+
+# ============================================================
+# 原生二进制健康检测 / 修复
+# ============================================================
+# 2.1.x 的 claude = "JS 壳 + 原生二进制"。install.cjs(postinstall) 把 optional 依赖
+# (@…-darwin-arm64 等) 里的原生二进制硬链接进 bin/claude.exe。下载失败或 --omit=optional
+# 时会留一个 JS 桩，运行时报 "claude native binary not installed"。用 file 类型区分。
+is_binary_healthy() {
+    local exe="$NPM_ROOT/$PACKAGE/bin/claude.exe"
+    [ -f "$exe" ] && file "$exe" 2>/dev/null | grep -qiE 'Mach-O|ELF|PE32'
+}
+
+# 修复缺失/损坏的原生二进制：先重跑 postinstall(optional 依赖已在盘上则秒链)，
+# 仍不行再 --force 强制重装以重新拉取 optional 依赖。
+repair_binary() {
+    echo "   → 重跑 postinstall 尝试重链原生二进制…"
+    node "$NPM_ROOT/$PACKAGE/install.cjs" >>"$LOG_FILE" 2>&1 || true
+    if is_binary_healthy; then
+        success "原生二进制已修复 (postinstall 重链)"
+        return 0
+    fi
+    echo "   → optional 依赖疑似缺失，强制重装以重新拉取…"
+    if npm install -g "${PACKAGE}@${REMOTE_LATEST}" --force >>"$LOG_FILE" 2>&1 && is_binary_healthy; then
+        success "原生二进制已修复 (强制重装)"
+        return 0
+    fi
+    return 1
 }
 
 # ============================================================
@@ -123,11 +159,15 @@ with open('$NPM_ROOT/$PACKAGE/package.json') as f:
     fi
 
     echo ""
+    # 原生二进制健康检测
+    if is_binary_healthy; then BINARY_HEALTHY=1; else BINARY_HEALTHY=0; fi
+
     echo "  ┌─────────────────────────────────────────"
     echo "  │ 远程最新:  $REMOTE_LATEST"
     echo "  │ 本地 CLI:  ${CURRENT:-未安装}"
     echo "  │ CLI 路径:  ${LOCAL_BIN_PATH:-无}"
     echo "  │ npm 包:    ${NPM_PKG_VERSION:-未安装}"
+    echo "  │ 原生二进制: $([ "$BINARY_HEALTHY" -eq 1 ] && echo '正常' || echo '缺失/损坏')"
     echo "  │ npm bin:   $NPM_BIN"
     echo "  └─────────────────────────────────────────"
     echo ""
@@ -169,9 +209,18 @@ do_install_or_upgrade() {
     elif [ "$CURRENT" != "$REMOTE_LATEST" ]; then
         echo "→ 动作: 升级 $CURRENT → $REMOTE_LATEST"
     else
-        echo "→ 动作: 已是最新 ($CURRENT)，跳过安装"
+        if [ "$BINARY_HEALTHY" -eq 1 ]; then
+            echo "→ 动作: 已是最新 ($CURRENT)，跳过安装"
+            echo ""
+            return 0
+        fi
+        echo "→ 动作: 版本已是最新 ($CURRENT) 但原生二进制缺失/损坏，执行修复"
         echo ""
-        return 0
+        if repair_binary; then
+            echo ""
+            return 0
+        fi
+        die "原生二进制修复失败。手动: node $NPM_ROOT/$PACKAGE/install.cjs  或  npm install -g ${PACKAGE}@latest --force"
     fi
     echo ""
 
@@ -199,6 +248,12 @@ do_install_or_upgrade() {
 
     [ ! -f "$NPM_ROOT/$PACKAGE/package.json" ] && \
         die "安装后未找到 $NPM_ROOT/$PACKAGE/package.json"
+
+    # 安全网：install 后原生二进制仍是桩(optional 下载失败)则就地修复
+    if ! is_binary_healthy; then
+        warn "npm install 完成但原生二进制缺失，尝试修复…"
+        repair_binary || die "原生二进制修复失败。手动: node $NPM_ROOT/$PACKAGE/install.cjs"
+    fi
 
     CURRENT=$(python3 -c "
 import json
