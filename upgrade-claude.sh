@@ -67,13 +67,13 @@ is_binary_healthy() {
 # 仍不行再 --force 强制重装以重新拉取 optional 依赖。
 repair_binary() {
     echo "   → 重跑 postinstall 尝试重链原生二进制…"
-    node "$NPM_ROOT/$PACKAGE/install.cjs" >>"$LOG_FILE" 2>&1 || true
+    node "$NPM_ROOT/$PACKAGE/install.cjs" 2>&1 | tee -a "$LOG_FILE" || true
     if is_binary_healthy; then
         success "原生二进制已修复 (postinstall 重链)"
         return 0
     fi
     echo "   → optional 依赖疑似缺失，强制重装以重新拉取…"
-    if npm install -g "${PACKAGE}@${REMOTE_LATEST}" --force >>"$LOG_FILE" 2>&1 && is_binary_healthy; then
+    if npm install -g "${PACKAGE}@${REMOTE_LATEST}" --force 2>&1 | tee -a "$LOG_FILE" && is_binary_healthy; then
         success "原生二进制已修复 (强制重装)"
         return 0
     fi
@@ -225,8 +225,18 @@ do_install_or_upgrade() {
     echo ""
 
     log "npm install -g ${PACKAGE}@latest"
+    log "正在安装 ${PACKAGE}@latest ..."
     local npm_output
-    npm_output=$(npm install -g "${PACKAGE}@latest" 2>&1) || {
+    local npm_install_log
+    npm_install_log="$(mktemp)"
+    set +o pipefail
+    npm install -g "${PACKAGE}@latest" 2>&1 | tee "$npm_install_log"
+    local npm_exit_code=${PIPESTATUS[0]}
+    set -o pipefail
+    npm_output="$(<"$npm_install_log")"
+    rm -f "$npm_install_log"
+
+    if [ "$npm_exit_code" -ne 0 ]; then
         error "npm install 失败"
         echo ""
         echo "$npm_output" | tail -20
@@ -241,7 +251,7 @@ do_install_or_upgrade() {
             echo "🔧 网络问题。检查代理: npm config get proxy"
         fi
         die "npm install 失败"
-    }
+    fi
 
     success "npm install 完成"
     log "npm output: $(echo "$npm_output" | tail -3 | tr '\n' ' ')"
@@ -368,6 +378,45 @@ cleanup() {
 }
 
 # ============================================================
+# 阶段 5.5: 同步到 GitHub
+# ============================================================
+
+sync_to_github() {
+    log "正在同步到 GitHub ..."
+
+    # 检查是否为 git 仓库
+    if ! git rev-parse --git-dir >/dev/null 2>&1; then
+        warn "当前目录不是 git 仓库，跳过 GitHub 同步"
+        return 0
+    fi
+
+    # 检查是否有变更
+    if git diff --quiet && git diff --cached --quiet; then
+        log "没有文件变更，跳过 GitHub 同步"
+        return 0
+    fi
+
+    # 暂存变更（脚本自身）
+    git add upgrade-claude.sh 2>/dev/null || git add -A
+
+    # 生成 commit message（包含版本号）
+    local new_version="${1:-latest}"
+    local commit_msg="chore: upgrade claude-code to ${new_version}"
+
+    if ! git commit -m "$commit_msg" 2>&1; then
+        warn "Git commit 失败，跳过 GitHub 同步"
+        return 0
+    fi
+
+    # 推送到远程
+    if git push 2>&1; then
+        success "已同步到 GitHub ($new_version)"
+    else
+        warn "Git push 失败，请手动推送。commit 已创建"
+    fi
+}
+
+# ============================================================
 # 阶段 6: 汇总
 # ============================================================
 
@@ -394,6 +443,7 @@ main() {
     do_install_or_upgrade
     fix_symlink
     verify
+    sync_to_github "$REMOTE_LATEST"
     cleanup
     summary
 }
