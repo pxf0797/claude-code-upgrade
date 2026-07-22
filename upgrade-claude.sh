@@ -224,13 +224,16 @@ do_install_or_upgrade() {
     fi
     echo ""
 
-    log "npm install -g ${PACKAGE}@latest"
-    log "正在安装 ${PACKAGE}@latest ..."
+    echo "⏳ 正在下载 ${PACKAGE} (~250MB，约需 1-5 分钟)..."
+    echo "   请勿关闭此窗口"
+
+    log "npm install -g ${PACKAGE}@${REMOTE_LATEST}"
+    log "正在安装 ${PACKAGE}@${REMOTE_LATEST} ..."
     local npm_output
     local npm_install_log
-    npm_install_log="$(mktemp)"
+    npm_install_log="$HOME/.claude/install-$(date +%Y%m%d-%H%M%S).log"
     set +o pipefail
-    npm install -g "${PACKAGE}@latest" 2>&1 | tee "$npm_install_log"
+    npm install -g --loglevel verbose "${PACKAGE}@${REMOTE_LATEST}" 2>&1 | tee "$npm_install_log"
     local npm_exit_code=${PIPESTATUS[0]}
     set -o pipefail
     npm_output="$(<"$npm_install_log")"
@@ -253,6 +256,7 @@ do_install_or_upgrade() {
         die "npm install 失败"
     fi
 
+    echo "✅ 下载完成，正在验证..."
     success "npm install 完成"
     log "npm output: $(echo "$npm_output" | tail -3 | tr '\n' ' ')"
 
@@ -434,14 +438,103 @@ summary() {
 }
 
 # ============================================================
+# 阶段 6.5: 深度安装验证
+# ============================================================
+
+verify_install() {
+    local BIN="${NPM_BIN}/claude"
+    local errors=0
+
+    echo "→ 验证安装..."
+
+    # 1. 检查二进制存在且大小 > 1000 bytes（排除 JS 桩）
+    if [ -f "$BIN" ]; then
+        local size
+        size=$(stat -f%z "$BIN" 2>/dev/null || echo "0")
+        if [ "$size" -lt 1000 ]; then
+            echo "  ❌ 二进制疑似 JS 桩 (${size} bytes)"
+            ((errors++))
+        else
+            echo "  ✅ 二进制大小正常 (${size} bytes)"
+        fi
+    else
+        echo "  ❌ 二进制不存在"
+        ((errors++))
+    fi
+
+    # 2. 检查是否为 Mach-O 原生二进制
+    if file "$BIN" 2>/dev/null | grep -q "Mach-O"; then
+        echo "  ✅ Mach-O 原生二进制"
+    else
+        echo "  ⚠️  非 Mach-O 格式 ($(file "$BIN" 2>/dev/null))"
+    fi
+
+    # 3. 检查可执行性
+    if "$BIN" --version >/dev/null 2>&1; then
+        local ver
+        ver=$("$BIN" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+        echo "  ✅ 可执行 (版本: $ver)"
+    else
+        echo "  ❌ 无法执行"
+        ((errors++))
+    fi
+
+    # 4. 检查 native addon
+    local addon
+    addon=$(find /opt/homebrew/lib/node_modules/@anthropic-ai -name "*.node" 2>/dev/null | head -1)
+    if [ -n "$addon" ]; then
+        echo "  ✅ Native addon: $addon"
+    else
+        echo "  ❌ Native addon 缺失"
+        ((errors++))
+    fi
+
+    return $errors
+}
+
+# ============================================================
 # 主流程
 # ============================================================
 
 main() {
+    # 处理命令行参数
+    for arg in "$@"; do
+        case "$arg" in
+            --verify-only)
+                # 仅运行深度验证，不做安装
+                preflight_check
+                if verify_install; then
+                    echo "✅ 健康检查通过"
+                    exit 0
+                else
+                    echo "❌ 健康检查未通过"
+                    exit 1
+                fi
+                ;;
+            --quiet)
+                # 静默模式：重定向输出到日志文件
+                exec 1> >(tee -a "$LOG_FILE")
+                exec 2>&1
+                ;;
+        esac
+    done
+
     preflight_check
     detect_state
     do_install_or_upgrade
     fix_symlink
+
+    # 深度验证
+    if ! verify_install; then
+        echo ""
+        echo "❌ 安装验证失败。可能原因："
+        echo "   1. npm 提取原生二进制包不完整（Node v25 已知问题）"
+        echo "   2. 建议降级到 Node 22 LTS: brew install node@22"
+        echo ""
+        echo "   可以重试: ~/claude/upgrade-claude.sh"
+        exit 1
+    fi
+
     verify
     sync_to_github "$REMOTE_LATEST"
     cleanup
