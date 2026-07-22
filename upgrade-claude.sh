@@ -453,7 +453,7 @@ verify_install() {
     # 1. 检查二进制存在且大小 > 1000 bytes（排除 JS 桩）
     if [ -f "$BIN" ]; then
         local size
-        size=$(stat -f%z "$BIN" 2>/dev/null || echo "0")
+        size=$(stat -Lf%z "$BIN" 2>/dev/null || echo "0")
         if [ "$size" -lt 1000 ]; then
             echo "  ❌ 二进制疑似 JS 桩 (${size} bytes)"
             ((errors++))
@@ -482,13 +482,13 @@ verify_install() {
         ((errors++))
     fi
 
-    # 4. 检查 native addon
-    local addon
-    addon=$(find /opt/homebrew/lib/node_modules/@anthropic-ai -name "*.node" 2>/dev/null | head -1)
-    if [ -n "$addon" ]; then
-        echo "  ✅ Native addon: $addon"
+    # 4. 检查可选依赖原生二进制（v2.x 无单独 .node 文件，二进制自包含）
+    local opt_dep_dir="$NPM_ROOT/$PACKAGE/node_modules/@anthropic-ai"
+    local opt_bin=$(find "$opt_dep_dir" -type f -perm +111 -name "claude" 2>/dev/null | head -1)
+    if [ -n "$opt_bin" ] && [ "$(stat -f%z "$opt_bin" 2>/dev/null || echo 0)" -gt 1048576 ]; then
+        echo "  ✅ 可选依赖: $opt_bin ($(stat -f%z "$opt_bin") bytes)"
     else
-        echo "  ❌ Native addon 缺失"
+        echo "  ❌ 可选依赖缺失或损坏"
         ((errors++))
     fi
 
