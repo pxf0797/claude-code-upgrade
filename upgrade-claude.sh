@@ -60,7 +60,10 @@ die() {
 # 时会留一个 JS 桩，运行时报 "claude native binary not installed"。用 file 类型区分。
 is_binary_healthy() {
     local exe="$NPM_ROOT/$PACKAGE/bin/claude.exe"
-    [ -f "$exe" ] && file "$exe" 2>/dev/null | grep -qiE 'Mach-O|ELF|PE32'
+    # 1. 文件存在 且 2. Mach-O/ELF/PE32 格式 且 3. > 1MB（排除 JS 桩）
+    [ -f "$exe" ] \
+        && [ "$(stat -f%z "$exe" 2>/dev/null || echo 0)" -gt 1048576 ] \
+        && file "$exe" 2>/dev/null | grep -qiE 'Mach-O|ELF|PE32'
 }
 
 # 修复缺失/损坏的原生二进制：先重跑 postinstall(optional 依赖已在盘上则秒链)，
