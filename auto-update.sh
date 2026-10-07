@@ -1,6 +1,6 @@
 #!/bin/bash
 # Claude Code auto-update script (launchd 每日调度)
-export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+export PATH="$HOME/local/node-v22.14.0-darwin-arm64/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 LOG_FILE="$HOME/.claude/auto-update.log"
 

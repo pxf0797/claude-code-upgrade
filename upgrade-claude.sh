@@ -203,6 +203,24 @@ with open('$NPM_ROOT/$PACKAGE/package.json') as f:
 }
 
 # ============================================================
+# 阶段 1.5: 清理 npm 残留临时目录
+# ============================================================
+# npm 安装中断会在 node_modules/@anthropic-ai/ 下残留 .claude-code-*
+# 半成品目录，导致后续 npm install 报 ENOTEMPTY rename 失败，形成死锁。
+cleanup_npm_residue() {
+    local residue_dir="$NPM_ROOT/@anthropic-ai"
+    [ -d "$residue_dir" ] || return 0
+    local found
+    found=$(find "$residue_dir" -maxdepth 1 -name '.claude-code-*' -type d 2>/dev/null || true)
+    [ -z "$found" ] && return 0
+    warn "发现 npm 残留临时目录，清理中…"
+    echo "$found" | while read -r d; do
+        rm -rf "$d" && echo "   移除 $d"
+    done
+    success "npm 残留已清理"
+}
+
+# ============================================================
 # 阶段 2: 安装/升级
 # ============================================================
 
@@ -524,6 +542,7 @@ main() {
 
     preflight_check
     detect_state
+    cleanup_npm_residue
     do_install_or_upgrade
     fix_symlink
 
